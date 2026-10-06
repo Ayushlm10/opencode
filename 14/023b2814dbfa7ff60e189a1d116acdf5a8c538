@@ -1,0 +1,19 @@
+packages/tui/src/context/local.tsx
+  s_67a2ae652b9331::t_d5db549f420d92 177,181,183-184,196-199,235,252-254,259-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "14023b2814dbfa7ff60e189a1d116acdf5a8c538",
+  "prompts": {},
+  "sessions": {
+    "s_67a2ae652b9331": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f2505977-0786-4292-959b-cb4671eca7bb",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ayush Thakur <athakur@cloudflare.com>"
+    }
+  }
+}

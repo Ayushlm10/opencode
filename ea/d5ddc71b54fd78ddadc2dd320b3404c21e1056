@@ -1,0 +1,21 @@
+packages/core/test/config/config.test.ts
+  s_66666f55de404d::t_3d690f757719bc 4-5,59,70-72,74,559-689
+packages/core/test/config/remote-safety.test.ts
+  s_66666f55de404d::t_ea24645835d925 65,138-150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ead5ddc71b54fd78ddadc2dd320b3404c21e1056",
+  "prompts": {},
+  "sessions": {
+    "s_66666f55de404d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1109d-aae7-7600-b713-4457f4f11352",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Ayush Thakur <athakur@cloudflare.com>"
+    }
+  }
+}

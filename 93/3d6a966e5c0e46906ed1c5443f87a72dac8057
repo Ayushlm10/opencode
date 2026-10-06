@@ -1,0 +1,21 @@
+packages/tui/test/model-cf-fallback.test.tsx
+  s_bf7cf6796771a3::t_8ea17baf0dafea 1-110
+packages/tui/test/context/local-selection.test.tsx
+  s_bf7cf6796771a3::t_49df91c50f5b0d 83,92-93,97-157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "933d6a966e5c0e46906ed1c5443f87a72dac8057",
+  "prompts": {},
+  "sessions": {
+    "s_bf7cf6796771a3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1102f-d52f-79e2-a614-2ab3674c6523",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Ayush Thakur <athakur@cloudflare.com>"
+    }
+  }
+}

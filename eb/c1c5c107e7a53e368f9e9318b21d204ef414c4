@@ -1,0 +1,37 @@
+packages/core/src/config.ts
+  s_66666f55de404d::t_17795e377d9c97 27-31,33-34,80,84,87-88,91,154-159,161,163-181,185-202,205-226,238-241,277-289,294-296,322,327-328,330-332,350,367-368,377-378,389-390,409,411
+packages/core/src/config/plugin/policy.ts
+  s_66666f55de404d::t_1b5b848375dabb 16,19,22,36-41
+packages/core/src/config/plugin/provider.ts
+  s_66666f55de404d::t_50f05b71fb4fbc 18,24,55,57,92
+packages/core/src/wellknown/plugin.ts
+  s_66666f55de404d::t_dbd8f787dc20ed 13-15
+packages/core/test/config/entry-observer.test.ts
+  s_66666f55de404d::t_d3cd3594617e4c 16
+packages/core/test/config/image.test.ts
+  s_66666f55de404d::t_26cfae969539c7 57
+packages/core/test/filesystem/watcher.test.ts
+  s_66666f55de404d::t_34d78526f073b8 368
+packages/core/test/mcp.test.ts
+  s_66666f55de404d::t_eea8358f63e718 294
+packages/core/test/plugin/skill.test.ts
+  s_66666f55de404d::t_8e129f1bb386f7 16-19,77
+packages/core/test/session-compact.test.ts
+  s_66666f55de404d::t_f0900ea48406b0 41-44
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ebc1c5c107e7a53e368f9e9318b21d204ef414c4",
+  "prompts": {},
+  "sessions": {
+    "s_66666f55de404d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1109d-aae7-7600-b713-4457f4f11352",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Ayush Thakur <athakur@cloudflare.com>"
+    }
+  }
+}

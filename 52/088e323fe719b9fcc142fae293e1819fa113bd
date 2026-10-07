@@ -1,0 +1,25 @@
+packages/core/src/config.ts
+  s_66666f55de404d::t_211e8d6a2cd3a0 9,164-165,168-169,195,207-221,223,233,357,372-381
+packages/core/src/wellknown.ts
+  s_66666f55de404d::t_4238094ee057f2 46,115,117-121,123,134-136,148,157-158,168,171
+packages/core/test/config/config.test.ts
+  s_66666f55de404d::t_bf42f64d5bc951 510,584,608-651,677,760,783-785,790-809,812-826,909,911-921,986
+packages/server/test/config-auth-recovery.test.ts
+  s_66666f55de404d::t_c1562f5089e691 101-206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "52088e323fe719b9fcc142fae293e1819fa113bd",
+  "prompts": {},
+  "sessions": {
+    "s_66666f55de404d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1109d-aae7-7600-b713-4457f4f11352",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "Ayush Thakur <athakur@cloudflare.com>"
+    }
+  }
+}

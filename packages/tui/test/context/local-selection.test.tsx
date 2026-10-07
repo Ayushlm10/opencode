@@ -80,7 +80,7 @@ test("agent and model drafts are isolated across sessions and survive navigation
   expect(setup.local.model.selection()).toEqual({ providerID: "provider", modelID: "first", variant: "low" })
 })
 
-test("falls back from an unavailable session model without changing durable state", async () => {
+test("keeps an unavailable session model and variant selected", async () => {
   const selected = { providerID: "provider", id: "missing", variant: "high" }
   await using setup = await renderLocal({
     models: [model("first", ["low", "high"]), model("second")],
@@ -89,9 +89,70 @@ test("falls back from an unavailable session model without changing durable stat
   })
   await setup.data.session.sync("ses_first")
   setup.route.navigate({ type: "session", sessionID: "ses_first" })
-  expect(setup.local.model.selection()).toEqual({ providerID: "provider", modelID: "first", variant: "low" })
-  expect(setup.local.model.available()).toBe(true)
+  expect(setup.local.model.selection()).toEqual({ providerID: "provider", modelID: "missing", variant: "high" })
+  expect(setup.local.model.available()).toBe(false)
   expect(setup.data.session.get("ses_first")?.model).toEqual(selected)
+})
+
+test("keeps unavailable command-line, configured, agent and recent choices for new sessions", async () => {
+  {
+    await using setup = await renderLocal({
+      args: { model: "provider/missing" },
+      models: [model("first")],
+    })
+    expect(setup.local.model.selection()).toEqual({ providerID: "provider", modelID: "missing", variant: undefined })
+  }
+  {
+    await using setup = await renderLocal({
+      models: [model("first")],
+      fetch: (url) => {
+        if (url.pathname === "/api/config")
+          return json([{ type: "document", info: { model: { providerID: "provider", model: "missing", variant: "high" } } }])
+      },
+    })
+    expect(setup.local.model.selection()).toEqual({ providerID: "provider", modelID: "missing", variant: "high" })
+  }
+  {
+    await using setup = await renderLocal({
+      models: [model("first")],
+      agents: [agent("build", { providerID: "provider", id: "missing", variant: "high" })],
+    })
+    expect(setup.local.model.selection()).toEqual({ providerID: "provider", modelID: "missing", variant: "high" })
+  }
+  {
+    await using setup = await renderLocal({
+      models: [model("first")],
+      preferences: {
+        recent: [
+          { providerID: "provider", modelID: "missing" },
+          { providerID: "provider", modelID: "first" },
+        ],
+        variant: { "provider/missing": "high" },
+      },
+    })
+    expect(setup.local.model.selection()).toEqual({ providerID: "provider", modelID: "missing", variant: "high" })
+  }
+})
+
+test("carries an unavailable session choice into a new-session draft", async () => {
+  await using setup = await renderLocal({
+    models: [model("first")],
+    sessions: [session("ses_first", { providerID: "provider", id: "missing", variant: "high" })],
+  })
+  await setup.data.session.sync("ses_first")
+  setup.route.navigate({ type: "session", sessionID: "ses_first" })
+  const selected = setup.local.model.current()
+  expect(selected).toEqual({ providerID: "provider", modelID: "missing" })
+  setup.route.navigate({ type: "home" })
+  setup.local.model.set(selected!)
+  expect(setup.local.model.selection()).toEqual({ providerID: "provider", modelID: "missing", variant: undefined })
+  expect(setup.local.model.available()).toBe(false)
+})
+
+test("a fresh install without a model preference uses the first catalog model", async () => {
+  await using setup = await renderLocal({ models: [model("first"), model("second")] })
+  expect(setup.local.model.selection()).toEqual({ providerID: "provider", modelID: "first", variant: undefined })
+  expect(setup.local.model.available()).toBe(true)
 })
 
 test("a manual agent switch supersedes the CLI agent after its commit", async () => {

@@ -67,6 +67,22 @@ describe("ConfigPolicyPlugin.Plugin", () => {
     }),
   )
 
+  it.effect("blocks every provider while configuration sources are unavailable", () =>
+    Effect.gen(function* () {
+      const catalog = yield* Provider.Service
+      const managed = yield* ManagedPolicy.Service
+      yield* catalog.transform((catalog) => {
+        catalog.update(Provider.ID.openai, () => {})
+        catalog.update(Provider.ID.anthropic, () => {})
+      })
+      yield* managed.set({ statements: [provider("allow", "*")] })
+      const plugin = yield* Plugin.Service
+      yield* ConfigPolicyPlugin.Plugin.effect(yield* PluginHost.make(plugin))
+
+      expect(yield* catalog.available()).toEqual([])
+    }).pipe(Effect.provide(Config.testLayer([], undefined, true))),
+  )
+
   it.effect("prevents project policy from overriding user-global policy", () =>
     Effect.gen(function* () {
       const catalog = yield* Provider.Service

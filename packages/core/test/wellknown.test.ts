@@ -5,10 +5,61 @@ import { KV } from "@opencode/core/kv"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { WellKnown } from "@opencode/core/wellknown"
+import { WellKnownPlugin } from "@opencode/core/wellknown/plugin"
+import { Integration } from "@opencode/core/integration"
+import { Plugin } from "@opencode/core/plugin"
+import { PluginHost } from "@opencode/core/plugin/host"
+import { PluginTestLayer } from "./plugin/fixture"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(FetchHttpClient.layer)
 const serviceIt = testEffect(LayerNode.compile(LayerNode.group([WellKnown.node, KV.node, Bus.node])))
+const pluginIt = testEffect(PluginTestLayer)
+
+pluginIt.live("keeps known login methods and refresh listeners after initial discovery fails", () =>
+  Effect.gen(function* () {
+    const bus = yield* Bus.Service
+    const integrations = yield* Integration.Service
+    const plugin = yield* Plugin.Service
+    const host = yield* PluginHost.make(plugin)
+    const integrationID = Integration.ID.make("https://login.example")
+    let entry: WellKnown.Entry = {
+      origin: integrationID,
+      integrationID,
+      manifest: { auth: { command: ["synthetic-login"], env: "TOKEN" } },
+    }
+    const wellknown = WellKnown.Service.of({
+      entries: () => Effect.fail(new Error("discovery unavailable")),
+      snapshot: () => [entry],
+      refresh: () => Effect.succeed(false),
+      add: () => Effect.die("unused WellKnown.add"),
+      remove: () => Effect.die("unused WellKnown.remove"),
+      resolve: () => Effect.die("unused WellKnown.resolve"),
+    })
+
+    yield* WellKnownPlugin.Plugin.effect(host).pipe(Effect.provideService(WellKnown.Service, wellknown))
+    expect((yield* integrations.get(integrationID))?.methods).toContainEqual({
+      id: Integration.MethodID.make("login"),
+      type: "command",
+      label: "Log in",
+      command: ["synthetic-login"],
+    })
+
+    entry = { ...entry, manifest: { auth: { command: ["recovered-login"], env: "TOKEN" } } }
+    yield* bus.publish(WellKnown.Event.Updated, {})
+    yield* waitUntil(
+      integrations
+        .get(integrationID)
+        .pipe(
+          Effect.map(
+            (value) =>
+              value?.methods.some((method) => method.type === "command" && method.command[0] === "recovered-login") ===
+              true,
+          ),
+        ),
+    )
+  }),
+)
 
 it.live("loads embedded and remote configuration", () =>
   Effect.acquireUseRelease(
@@ -117,3 +168,11 @@ serviceIt.live("refreshes changed manifests", () =>
     ({ server }) => Effect.promise(() => server.stop(true)),
   ),
 )
+
+const waitUntil = Effect.fnUntraced(function* (condition: Effect.Effect<boolean>) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (yield* condition) return
+    yield* Effect.sleep("10 millis")
+  }
+  return yield* Effect.die("Timed out waiting for wellknown reload")
+})

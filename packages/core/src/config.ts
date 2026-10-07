@@ -24,7 +24,14 @@ export function latest<K extends keyof Info>(entries: readonly Entry[], key: K):
     ?.info[key]
 }
 
+export interface Snapshot {
+  readonly entries: Entry[]
+  readonly blocked: boolean
+}
+
 export interface Interface {
+  /** Internal atomic read used by synchronous config transforms. */
+  readonly current: () => Snapshot
   /** Returns location config documents and discovery sources from lowest to highest priority. */
   readonly entries: () => Effect.Effect<Entry[]>
   /** Compatibility roots consumed by internal compatibility plugins. */
@@ -70,16 +77,18 @@ export const testLayer = (
     claude: [],
     agents: [],
   },
+  blocked = false,
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
-      const entries = yield* Ref.make(initial)
+      const snapshot = yield* Ref.make<Snapshot>({ entries: initial, blocked })
       const updates = yield* PubSub.unbounded<Watcher.Update>()
       const service = Test.of({
-        entries: () => Ref.get(entries),
+        current: () => Ref.getUnsafe(snapshot),
+        entries: () => Ref.get(snapshot).pipe(Effect.map((value) => value.entries)),
         compatibility: () => Effect.succeed(compatibility),
         changes: () => Stream.fromPubSub(updates),
-        setEntries: (next) => Ref.set(entries, next),
+        setEntries: (entries) => Ref.update(snapshot, (value) => ({ ...value, entries })),
         emitChange: (update) => PubSub.publish(updates, update).pipe(Effect.asVoid),
       })
       return Context.empty().pipe(Context.add(Service, service), Context.add(Test, service))
@@ -142,44 +151,82 @@ export const layer = (options?: Options) =>
         return new Document({ type: "document", path: AbsolutePath.make(filepath), info })
       })
 
-      const loadWellknownEntry = Effect.fnUntraced(function* (entry: WellKnown.Entry) {
-        const auth = entry.manifest.auth
-        if (!auth) return []
+      type Resolved = {
+        readonly credentialID: Credential.ID
+        readonly key: string
+        readonly documents: Document[]
+      }
+      const loadWellknownEntry = Effect.fnUntraced(function* (entry: WellKnown.Entry, previous?: Resolved) {
         const credential = (yield* credentials.list(entry.integrationID)).at(-1)
-        if (!credential || credential.value.type !== "key") return []
-        const variables = { [auth.env]: credential.value.key }
-        const configs = yield* wellknown
-          .resolve(entry, variables)
-          .pipe(
-            Effect.catch(() =>
-              Effect.logWarning("failed to load wellknown config", { source: entry.origin }).pipe(
-                Effect.as([] as const),
+        if (!credential || credential.value.type !== "key") return { blocked: false }
+        const key = credential.value.key
+        const auth = entry.manifest.auth
+        if (!auth)
+          return previous?.credentialID === credential.id && previous.key === key
+            ? { value: previous, blocked: false }
+            : { blocked: true }
+        const variables = { [auth.env]: key }
+        const documents = wellknown.resolve(entry, variables).pipe(
+          Effect.flatMap((configs) =>
+            Effect.forEach(configs, (config) =>
+              ConfigVariable.substitute({
+                type: "virtual",
+                source: entry.origin,
+                dir: entry.origin,
+                text: JSON.stringify(config),
+                env: variables,
+              }).pipe(
+                Effect.flatMap((text) => parseInfo(text, entry.origin)),
+                Effect.flatMap((info) =>
+                  info
+                    ? Effect.succeed(new Document({ type: "document", info }))
+                    : Effect.fail(new Error("Invalid wellknown config")),
+                ),
               ),
             ),
-          )
-        return yield* Effect.forEach(configs, (config) =>
-          ConfigVariable.substitute({
-            type: "virtual",
-            source: entry.origin,
-            dir: entry.origin,
-            text: JSON.stringify(config),
-            env: variables,
-          }).pipe(
-            Effect.flatMap((text) => parseInfo(text, entry.origin)),
-            Effect.map((info) => (info ? new Document({ type: "document", info }) : undefined)),
           ),
-        ).pipe(Effect.map((documents) => documents.filter((document) => document !== undefined)))
+        )
+        return yield* documents.pipe(
+          Effect.matchEffect({
+            onFailure: () =>
+              Effect.logWarning("failed to load wellknown config", { source: entry.origin }).pipe(
+                Effect.as(
+                  previous?.credentialID === credential.id && previous.key === key
+                    ? { value: previous, blocked: false }
+                    : { blocked: true },
+                ),
+              ),
+            onSuccess: (documents) =>
+              Effect.succeed({
+                value: { credentialID: credential.id, key, documents },
+                blocked: false,
+              }),
+          }),
+        )
       })
 
-      const loadWellknown = Effect.fn("Config.loadWellknown")(function* () {
-        const entries = yield* wellknown
-          .entries()
-          .pipe(
-            Effect.catch((error) =>
-              Effect.logWarning("failed to discover wellknown config", { error }).pipe(Effect.as([] as const)),
-            ),
-          )
-        return yield* Effect.forEach(entries, loadWellknownEntry).pipe(Effect.map((documents) => documents.flat()))
+      const loadWellknown = Effect.fn("Config.loadWellknown")(function* (previous: ReadonlyMap<string, Resolved>) {
+        const discovered = yield* wellknown.entries().pipe(
+          Effect.matchEffect({
+            onFailure: (error) =>
+              Effect.logWarning("failed to discover wellknown config", { error }).pipe(
+                Effect.as({ entries: wellknown.snapshot(), blocked: true }),
+              ),
+            onSuccess: (entries) => Effect.succeed({ entries, blocked: false }),
+          }),
+        )
+        const loaded = yield* Effect.forEach(discovered.entries, (entry) =>
+          loadWellknownEntry(entry, previous.get(entry.origin)).pipe(
+            Effect.map((result) => ({ origin: entry.origin, ...result })),
+          ),
+        )
+        return {
+          documents: loaded.flatMap((result) => result.value?.documents ?? []),
+          resolved: new Map(
+            loaded.flatMap((result): [string, Resolved][] => (result.value ? [[result.origin, result.value]] : [])),
+          ),
+          blocked: discovered.blocked || loaded.some((result) => result.blocked),
+        }
       })
 
       const loadDirectory = Effect.fnUntraced(function* (directory: AbsolutePath) {
@@ -191,7 +238,10 @@ export const layer = (options?: Options) =>
         ]
       })
 
-      const load = Effect.fn("Config.load")(function* (sources: ConfigDiscovery.Sources) {
+      const load = Effect.fn("Config.load")(function* (
+        sources: ConfigDiscovery.Sources,
+        previous: ReadonlyMap<string, Resolved>,
+      ) {
         const direct = yield* Effect.forEach(sources.direct, (filepath) => loadFile(filepath)).pipe(
           Effect.orDie,
           Effect.map((entries) => entries.filter((entry): entry is Document => entry !== undefined)),
@@ -227,19 +277,26 @@ export const layer = (options?: Options) =>
           Effect.orDie,
           Effect.map((entries) => entries.flat()),
         )
-        return [
-          ...(yield* loadWellknown().pipe(Effect.orDie)),
-          ...globalSupplementary,
-          ...explicit,
-          ...direct,
-          ...projectSupplementary,
-          ...content,
-        ]
+        const remote = yield* loadWellknown(previous).pipe(Effect.orDie)
+        return {
+          entries: [
+            ...remote.documents,
+            ...globalSupplementary,
+            ...explicit,
+            ...direct,
+            ...projectSupplementary,
+            ...content,
+          ],
+          resolved: remote.resolved,
+          blocked: remote.blocked,
+        }
       })
 
       const initial = yield* ConfigDiscovery.discover(options)
       let sources = initial
-      let configs = yield* load(initial)
+      const loaded = yield* load(initial, new Map())
+      let resolved = loaded.resolved
+      let snapshot: Snapshot = { entries: loaded.entries, blocked: loaded.blocked }
       const updates = yield* PubSub.unbounded<Watcher.Update>()
       const reloads = yield* PubSub.sliding<void>(1)
       // Readiness rescans recover writes made before a watch attached.
@@ -265,14 +322,17 @@ export const layer = (options?: Options) =>
       const reload = Effect.fn("Config.reload")(
         function* () {
           const discovered = yield* ConfigDiscovery.discover(options)
-          const next = yield* load(discovered)
+          const loaded = yield* load(discovered, resolved)
           yield* reconcile(discovered)
           const compatibilityChanged =
             !isDeepStrictEqual(sources.claude, discovered.claude) ||
             !isDeepStrictEqual(sources.agents, discovered.agents)
-          if (isDeepStrictEqual(configs, next) && !compatibilityChanged) return
+          const next: Snapshot = { entries: loaded.entries, blocked: loaded.blocked }
+          const changed = !isDeepStrictEqual(snapshot, next) || compatibilityChanged
           sources = discovered
-          configs = next
+          resolved = loaded.resolved
+          snapshot = next
+          if (!changed) return
           yield* bus.publish(Event.Updated, {})
         },
         (effect) => reloadLock.withPermit(effect),
@@ -290,8 +350,8 @@ export const layer = (options?: Options) =>
       yield* bus.subscribe(Credential.Event.Switched).pipe(
         Stream.filterEffect((event) =>
           wellknown.entries().pipe(
+            Effect.orElseSucceed(() => wellknown.snapshot()),
             Effect.map((entries) => entries.some((entry) => entry.integrationID === event.data.integrationID)),
-            Effect.orElseSucceed(() => false),
           ),
         ),
         Stream.runForEach(() =>
@@ -307,9 +367,8 @@ export const layer = (options?: Options) =>
       )
       yield* Effect.sleep("10 minutes").pipe(
         Effect.andThen(
-          Effect.suspend(() => {
-            if (!wellknown.snapshot().length) return Effect.void
-            return Effect.gen(function* () {
+          Effect.suspend(() =>
+            Effect.gen(function* () {
               const changed = yield* wellknown
                 .refresh()
                 .pipe(
@@ -318,8 +377,8 @@ export const layer = (options?: Options) =>
                   ),
                 )
               if (!changed) yield* reload()
-            }).pipe(Effect.catchCause((cause) => Effect.logWarning("failed to refresh wellknown config", { cause })))
-          }),
+            }).pipe(Effect.catchCause((cause) => Effect.logWarning("failed to refresh wellknown config", { cause }))),
+          ),
         ),
         Effect.forever,
         Effect.forkScoped({ startImmediately: true }),
@@ -330,7 +389,8 @@ export const layer = (options?: Options) =>
         function* (patch: Patch) {
           const directory = initial.global ?? AbsolutePath.make(globalService.config)
           const candidates = ConfigDiscovery.names.map((name) => path.join(directory, name))
-          const filepath = (yield* Effect.filter(candidates, fs.isFile)).at(-1) ?? path.join(directory, "opencode.jsonc")
+          const filepath =
+            (yield* Effect.filter(candidates, fs.isFile)).at(-1) ?? path.join(directory, "opencode.jsonc")
           const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
           const updated = yield* Effect.try({
             try: () =>
@@ -349,8 +409,9 @@ export const layer = (options?: Options) =>
       )
 
       return Service.of({
+        current: () => snapshot,
         entries: Effect.fnUntraced(function* () {
-          return configs
+          return snapshot.entries
         }),
         compatibility: () =>
           Effect.all({

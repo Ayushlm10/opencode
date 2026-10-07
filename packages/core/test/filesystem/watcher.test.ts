@@ -365,6 +365,7 @@ describe("LocationWatcher subscriptions", () => {
     const config = Layer.succeed(
       Config.Service,
       Config.Service.of({
+        current: () => ({ entries: entries.current, blocked: false }),
         entries: () => Effect.sync(() => entries.current),
         changes: () => Stream.never,
       }),

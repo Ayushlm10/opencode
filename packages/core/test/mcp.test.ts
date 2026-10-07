@@ -291,6 +291,7 @@ function resourceMcpLayer(
           ? Layer.succeed(
               Config.Service,
               Config.Service.of({
+                current: () => ({ entries: [], blocked: false }),
                 entries: overrides.entries,
                 changes: () => Stream.never,
               }),

@@ -1,7 +1,7 @@
 import { describe, expect } from "bun:test"
 import { Money } from "@opencode/schema/money"
 import { Document, Info, type Entry } from "@opencode/schema/config"
-import { Effect, Schema } from "effect"
+import { Effect, Schema, Stream } from "effect"
 import { Config } from "@opencode/core/config"
 import { ConfigProviderPlugin } from "@opencode/core/config/plugin/provider"
 import { ConfigNormalize } from "@opencode/core/config/normalize"
@@ -34,6 +34,37 @@ function required<T>(value: T | undefined): T {
 const decode = Schema.decodeUnknownSync(Info)
 
 describe("ConfigProviderPlugin.Plugin", () => {
+  it.effect("reads provider overlays from the committed snapshot", () =>
+    Effect.gen(function* () {
+      const plugin = yield* Plugin.Service
+      const host = yield* PluginHost.make(plugin)
+      const providers = yield* Provider.Service
+      const stale = [
+        new Document({
+          type: "document",
+          info: decode({ providers: { custom: { settings: { baseURL: "https://stale.example" } } } }),
+        }),
+      ]
+      const current = [
+        new Document({
+          type: "document",
+          info: decode({ providers: { custom: { settings: { baseURL: "https://current.example" } } } }),
+        }),
+      ]
+      const config = Config.Service.of({
+        entries: () => Effect.succeed(stale),
+        current: () => ({ entries: current, blocked: false }),
+        changes: () => Stream.empty,
+      })
+
+      yield* ConfigProviderPlugin.Plugin.effect(host).pipe(Effect.provideService(Config.Service, config))
+
+      expect((yield* providers.get(Provider.ID.make("custom")))?.settings).toEqual({
+        baseURL: "https://current.example",
+      })
+    }),
+  )
+
   it.effect("inherits the provider compaction setting with model overrides and rejects unsupported routes", () =>
     Effect.gen(function* () {
       const models = yield* Model.Service
@@ -48,7 +79,10 @@ describe("ConfigProviderPlugin.Plugin", () => {
                 settings: { compaction: { type: "native" } },
                 models: {
                   native: {},
-                  local: { settings: { compaction: { type: "summary" } }, package: "@opencode/ai/providers/openai/chat" },
+                  local: {
+                    settings: { compaction: { type: "summary" } },
+                    package: "@opencode/ai/providers/openai/chat",
+                  },
                   unsupported: { package: "@opencode/ai/providers/openai/chat" },
                 },
               },

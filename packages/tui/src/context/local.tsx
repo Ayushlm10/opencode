@@ -46,13 +46,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       return !!models()?.some((item) => item.providerID === model.providerID && item.id === model.modelID)
     }
 
-    function getFirstValidModel(...modelFns: (() => ModelPreferenceModel | undefined)[]) {
-      for (const modelFn of modelFns) {
-        const model = modelFn()
-        if (model && isModelValid(model)) return model
-      }
-    }
-
     function createAgent() {
       const agents = createMemo(() =>
         (data.location.agent.list(location.ref) ?? []).filter((agent) => agent.mode !== "subagent" && !agent.hidden),
@@ -181,22 +174,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const fallbackModel = createMemo(() => {
         if (args.model) {
           const { providerID, modelID } = parse(args.model)
-          if (isModelValid({ providerID, modelID })) {
-            return {
-              providerID,
-              modelID,
-            }
-          }
+          if (providerID && modelID) return { providerID, modelID }
         }
 
         const configured = configuredModel()
-        if (configured && isModelValid(configured)) return configured
+        if (configured) return configured
 
-        for (const item of preferences.recent) {
-          if (isModelValid(item)) {
-            return item
-          }
-        }
+        const recent = preferences.recent[0]
+        if (recent) return recent
 
         const model = models()?.[0]
         if (!model) return undefined
@@ -208,10 +193,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
       const newSessionModel = createMemo(() => {
         const a = agent.current()
-        return getFirstValidModel(
-          () => a && selectionState.newSessionModelByLocationAgent[locationAgentKey(a.id)],
-          () => a?.model && { providerID: a.model.providerID, modelID: a.model.id },
-          fallbackModel,
+        return (
+          (a && selectionState.newSessionModelByLocationAgent[locationAgentKey(a.id)]) ??
+          (a?.model && { providerID: a.model.providerID, modelID: a.model.id }) ??
+          fallbackModel()
         )
       })
 
@@ -247,7 +232,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               : undefined),
         )
         const info = models()?.find((item) => item.providerID === model.providerID && item.id === model.modelID)
-        return { ...model, variant: info?.variants.some((item) => item.id === variant) ? variant : undefined }
+        return { ...model, variant: info ? (info.variants.some((item) => item.id === variant) ? variant : undefined) : variant }
       }
 
       function durableSelection(sessionID: string): ModelSelection | undefined {
@@ -264,15 +249,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         const current = agent.current()
         if (!current) return
         const session = data.session.get(sessionID)
-        const selected = [
-          selectionState.selectionBySessionAgent[sessionID]?.[current.id],
-          !session?.agent || session.agent === current.id ? durableSelection(sessionID) : undefined,
-        ].find((selection) => selection && isModelValid(selection))
+        const selected =
+          selectionState.selectionBySessionAgent[sessionID]?.[current.id] ??
+          (!session?.agent || session.agent === current.id ? durableSelection(sessionID) : undefined)
         if (selected) {
           const info = models()?.find((item) => item.providerID === selected.providerID && item.id === selected.modelID)
           return {
             ...selected,
-            variant: info?.variants.some((variant) => variant.id === selected.variant) ? selected.variant : undefined,
+            variant: info
+              ? info.variants.some((variant) => variant.id === selected.variant)
+                ? selected.variant
+                : undefined
+              : selected.variant,
           }
         }
         const model = newSessionModel()
@@ -451,7 +439,6 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         },
         set(model: { providerID: string; modelID: string }, options?: { recent?: boolean }) {
           batch(() => {
-            if (!isModelValid(model)) return
             if (!selectModel(model)) return
             if (options?.recent) {
               setPreferences("recent", recentModels(model, preferences.recent))

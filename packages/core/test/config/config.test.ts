@@ -1,8 +1,8 @@
 import path from "path"
 import fs from "fs/promises"
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Layer, Logger, Schema, Stream } from "effect"
-import { FastCheck } from "effect/testing"
+import { Clock, Deferred, Effect, Fiber, Layer, Logger, Schema, Stream } from "effect"
+import { FastCheck, TestClock } from "effect/testing"
 import { Config } from "@opencode/core/config"
 import { Directory, Document, Event, Info } from "@opencode/schema/config"
 import { ConfigModel } from "@opencode/schema/config/model"
@@ -56,6 +56,7 @@ function testLayer(
   credentialNode = emptyCredentialNode,
   wellknownNode = emptyWellknownNode,
   options?: Config.Options,
+  clock?: Clock.Clock,
 ) {
   const locationLayer = Layer.succeed(
     Location.Service,
@@ -66,8 +67,11 @@ function testLayer(
       ),
     ),
   )
+  const configNode = clock
+    ? Config.configured(options).mapLayer((layer) => layer.pipe(Layer.provide(Layer.succeed(Clock.Clock, clock))))
+    : Config.configured(options)
   const built = AppNodeBuilder.build(LayerNode.group([Config.node, Bus.node]), [
-    Config.node.replace(Config.configured(options)),
+    Config.node.replace(configNode),
     Location.node.replace(locationLayer),
     Global.node.replace(Global.layerWith({ config: globalDirectory, home: path.join(globalDirectory, "home") })),
     Credential.node.replace(credentialNode),
@@ -521,6 +525,7 @@ describe("Config", () => {
             const config = yield* Config.Service
             const bus = yield* Bus.Service
             const initial = yield* config.entries()
+            expect(config.current().blocked).toBe(true)
             expect(Config.latest(initial, "shell")).toBe("project")
             expect(
               initial.flatMap((entry) => (entry.type === "document" && entry.info.shell ? [entry.info.shell] : [])),
@@ -542,6 +547,333 @@ describe("Config", () => {
             expect(
               refreshed.flatMap((entry) => (entry.type === "document" && entry.info.shell ? [entry.info.shell] : [])),
             ).toEqual(["next", "global", "project"])
+            expect(config.current().blocked).toBe(false)
+          }).pipe(
+            Effect.provide(testLayer(project, global, project, undefined, undefined, credentialNode, wellknownNode)),
+          )
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("blocks a cold registered source with an active key and missing auth manifest", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        const integrationID = Integration.ID.make("https://missing-auth.example")
+        const credentialNode = makeGlobalNode({
+          service: Credential.Service,
+          layer: Layer.mock(Credential.Service)({
+            list: () =>
+              Effect.succeed([
+                new Credential.Info({
+                  id: Credential.ID.create(),
+                  integrationID,
+                  label: "missing auth",
+                  value: Credential.Key.make({ type: "key", key: "synthetic-key" }),
+                }),
+              ]),
+          }),
+          deps: [],
+        })
+        const entry: WellKnown.Entry = { origin: integrationID, integrationID, manifest: {} }
+        const wellknownNode = makeGlobalNode({
+          service: WellKnown.Service,
+          layer: Layer.mock(WellKnown.Service)({
+            entries: () => Effect.succeed([entry]),
+            snapshot: () => [entry],
+          }),
+          deps: [],
+        })
+        return Config.Service.use((config) => Effect.sync(() => expect(config.current().blocked).toBe(true))).pipe(
+          Effect.provide(
+            testLayer(
+              tmp.path,
+              path.join(tmp.path, "global"),
+              tmp.path,
+              undefined,
+              undefined,
+              credentialNode,
+              wellknownNode,
+            ),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.effect("retries cold discovery with an empty snapshot on the periodic refresh", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        const integrationID = Integration.ID.make("https://retry.example")
+        const credential = new Credential.Info({
+          id: Credential.ID.create(),
+          integrationID,
+          label: "retry",
+          value: Credential.Key.make({ type: "key", key: "retry-key" }),
+        })
+        const entry: WellKnown.Entry = {
+          origin: integrationID,
+          integrationID,
+          manifest: { auth: { command: ["retry-login"], env: "TOKEN" } },
+        }
+        let loaded = false
+        const credentialNode = makeGlobalNode({
+          service: Credential.Service,
+          layer: Layer.mock(Credential.Service)({ list: () => Effect.succeed([credential]) }),
+          deps: [],
+        })
+        const wellknownNode = makeGlobalNode({
+          service: WellKnown.Service,
+          layer: Layer.mock(WellKnown.Service)({
+            entries: () => (loaded ? Effect.succeed([entry]) : Effect.fail(new Error("discovery unavailable"))),
+            snapshot: () => (loaded ? [entry] : []),
+            refresh: () => Effect.sync(() => ((loaded = true), false)),
+            resolve: () => Effect.succeed([{ shell: "recovered" }]),
+          }),
+          deps: [],
+        })
+        return TestClock.make().pipe(
+          Effect.flatMap((clock) =>
+            Deferred.make<void>().pipe(
+              Effect.flatMap((sleeping) => {
+                const observed = {
+                  ...clock,
+                  sleep: (duration: Parameters<Clock.Clock["sleep"]>[0]) =>
+                    Effect.gen(function* () {
+                      const sleeper = yield* clock.sleep(duration).pipe(Effect.forkChild({ startImmediately: true }))
+                      yield* Effect.yieldNow
+                      yield* Deferred.succeed(sleeping, undefined)
+                      yield* Fiber.join(sleeper)
+                    }),
+                }
+                return Effect.gen(function* () {
+                  const config = yield* Config.Service
+                  const bus = yield* Bus.Service
+                  expect(config.current().blocked).toBe(true)
+                  const updated = yield* bus
+                    .subscribe(Event.Updated)
+                    .pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped({ startImmediately: true }))
+                  yield* Deferred.await(sleeping)
+
+                  yield* clock.adjust("10 minutes")
+                  expect(yield* Fiber.join(updated)).toHaveLength(1)
+
+                  expect(config.current().blocked).toBe(false)
+                  expect(Config.latest(config.current().entries, "shell")).toBe("recovered")
+                }).pipe(
+                  Effect.provide(
+                    testLayer(
+                      tmp.path,
+                      path.join(tmp.path, "global"),
+                      tmp.path,
+                      undefined,
+                      undefined,
+                      credentialNode,
+                      wellknownNode,
+                      undefined,
+                      observed,
+                    ),
+                  ),
+                )
+              }),
+            ),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("retains credential-bound remote config and reconciles logout, removal, and discovery failure", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const global = path.join(tmp.path, "global")
+          const project = path.join(tmp.path, "project")
+          yield* Effect.promise(() => Promise.all([fs.mkdir(global), fs.mkdir(project)]))
+
+          const firstID = Integration.ID.make("https://first.example")
+          const secondID = Integration.ID.make("https://second.example")
+          const firstEntry: WellKnown.Entry = {
+            origin: firstID,
+            integrationID: firstID,
+            manifest: { auth: { command: ["first-login"], env: "TOKEN" } },
+          }
+          const secondEntry: WellKnown.Entry = {
+            origin: secondID,
+            integrationID: secondID,
+            manifest: { auth: { command: ["second-login"], env: "TOKEN" } },
+          }
+          let registered = [firstEntry, secondEntry]
+          let discoveryAvailable = true
+          let firstAvailable = true
+          let secondAvailable = true
+          let firstEndpoint = "https://first.example/v1"
+          let secondShell = "second-1"
+          const firstCredential = new Credential.Info({
+            id: Credential.ID.create(),
+            integrationID: firstID,
+            label: "first",
+            value: Credential.Key.make({ type: "key", key: "first-key" }),
+          })
+          const secondCredential = new Credential.Info({
+            id: Credential.ID.create(),
+            integrationID: secondID,
+            label: "second",
+            value: Credential.Key.make({ type: "key", key: "second-key" }),
+          })
+          const saved = new Map<Integration.ID, Credential.Info[]>([
+            [firstID, [firstCredential]],
+            [secondID, [secondCredential]],
+          ])
+          const credentialNode = makeGlobalNode({
+            service: Credential.Service,
+            layer: Layer.succeed(
+              Credential.Service,
+              Credential.Service.of({
+                all: () => Effect.succeed(Array.from(saved.values()).flat()),
+                list: (integrationID) => Effect.succeed(saved.get(integrationID) ?? []),
+                get: () => Effect.die("unused Credential.get"),
+                create: () => Effect.die("unused Credential.create"),
+                activate: () => Effect.die("unused Credential.activate"),
+                update: () => Effect.die("unused Credential.update"),
+                remove: () => Effect.die("unused Credential.remove"),
+              }),
+            ),
+            deps: [],
+          })
+          const wellknownNode = makeGlobalNode({
+            service: WellKnown.Service,
+            layer: Layer.succeed(
+              WellKnown.Service,
+              WellKnown.Service.of({
+                entries: () =>
+                  discoveryAvailable ? Effect.succeed(registered) : Effect.fail(new Error("discovery unavailable")),
+                snapshot: () => registered,
+                refresh: () => Effect.succeed(false),
+                add: () => Effect.die("unused WellKnown.add"),
+                remove: () => Effect.die("unused WellKnown.remove"),
+                resolve: (entry, variables) => {
+                  if (entry.integrationID === firstID) {
+                    const active = saved.get(firstID)?.at(-1)?.value
+                    if (active?.type !== "key") throw new Error("Expected active key credential")
+                    expect(variables.TOKEN).toBe(active.key)
+                    return firstAvailable
+                      ? Effect.succeed([
+                          {
+                            model: "special/chat",
+                            providers: {
+                              special: {
+                                package: "native",
+                                settings: { baseURL: firstEndpoint },
+                                models: { chat: {} },
+                              },
+                            },
+                            experimental: {
+                              policies: [
+                                { action: "provider.use", resource: "*", effect: "deny" },
+                                { action: "provider.use", resource: "special", effect: "allow" },
+                              ],
+                            },
+                          },
+                        ])
+                      : Effect.fail(new Error("first unavailable"))
+                  }
+                  return secondAvailable
+                    ? Effect.succeed([{ shell: secondShell }])
+                    : Effect.fail(new Error("second unavailable"))
+                },
+              }),
+            ),
+            deps: [],
+          })
+
+          return yield* Effect.gen(function* () {
+            const config = yield* Config.Service
+            const bus = yield* Bus.Service
+            const snapshot = () => config.current()
+            const reload = Effect.fnUntraced(function* (event: Effect.Effect<unknown>) {
+              const updated = yield* bus
+                .subscribe(Event.Updated)
+                .pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped({ startImmediately: true }))
+              yield* event
+              expect(yield* Fiber.join(updated).pipe(Effect.timeout("3 seconds"))).toHaveLength(1)
+            })
+            const endpoint = () => Config.latest(snapshot().entries, "providers")?.special?.settings?.baseURL
+
+            expect(snapshot().blocked).toBe(false)
+            expect(endpoint()).toBe("https://first.example/v1")
+            expect(Config.latest(snapshot().entries, "shell")).toBe("second-1")
+
+            firstAvailable = false
+            secondShell = "second-2"
+            yield* reload(
+              bus.publish(
+                Credential.Event.Switched,
+                { credentialID: secondCredential.id, integrationID: secondID },
+                { global: true },
+              ),
+            )
+            expect(snapshot().blocked).toBe(false)
+            expect(endpoint()).toBe("https://first.example/v1")
+            expect(Config.latest(snapshot().entries, "shell")).toBe("second-2")
+
+            const replacement = new Credential.Info({
+              id: Credential.ID.create(),
+              integrationID: firstID,
+              label: "replacement",
+              value: Credential.Key.make({ type: "key", key: "replacement-key" }),
+            })
+            saved.set(firstID, [replacement])
+            yield* reload(
+              bus.publish(
+                Credential.Event.Switched,
+                { credentialID: replacement.id, integrationID: firstID },
+                { global: true },
+              ),
+            )
+            expect(snapshot().blocked).toBe(true)
+            expect(endpoint()).toBeUndefined()
+
+            firstAvailable = true
+            firstEndpoint = "https://first.example/v2"
+            yield* reload(
+              bus.publish(
+                Credential.Event.Switched,
+                { credentialID: replacement.id, integrationID: firstID },
+                { global: true },
+              ),
+            )
+            expect(snapshot().blocked).toBe(false)
+            expect(endpoint()).toBe("https://first.example/v2")
+
+            saved.set(firstID, [])
+            secondAvailable = false
+            yield* reload(
+              bus.publish(Credential.Event.Switched, { credentialID: null, integrationID: firstID }, { global: true }),
+            )
+            expect(snapshot().blocked).toBe(false)
+            expect(endpoint()).toBeUndefined()
+            expect(Config.latest(snapshot().entries, "shell")).toBe("second-2")
+
+            registered = []
+            yield* reload(bus.publish(WellKnown.Event.Updated, {}))
+            expect(snapshot().blocked).toBe(false)
+            expect(Config.latest(snapshot().entries, "shell")).toBeUndefined()
+
+            registered = [secondEntry]
+            secondAvailable = true
+            secondShell = "second-3"
+            yield* reload(bus.publish(WellKnown.Event.Updated, {}))
+            expect(Config.latest(snapshot().entries, "shell")).toBe("second-3")
+            discoveryAvailable = false
+            yield* reload(bus.publish(WellKnown.Event.Updated, {}))
+            expect(snapshot().blocked).toBe(true)
+            expect(Config.latest(snapshot().entries, "shell")).toBe("second-3")
           }).pipe(
             Effect.provide(testLayer(project, global, project, undefined, undefined, credentialNode, wellknownNode)),
           )

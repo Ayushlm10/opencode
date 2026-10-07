@@ -54,6 +54,7 @@ describe("ConfigImagePlugin.Plugin", () => {
       const plugins = yield* Plugin.Service
       let reads = 0
       const config = Config.Service.of({
+        current: () => ({ entries: [], blocked: false }),
         entries: () => Effect.sync(() => [document({ max_width: reads++ === 0 ? 1_200 : 700, max_base64_bytes: 1 })]),
         changes: () => Stream.empty,
       })

@@ -13,6 +13,10 @@ const config = (plugins: Info["plugins"] = []) =>
   Layer.succeed(
     Config.Service,
     Config.Service.of({
+      current: () => ({
+        entries: [new Document({ type: "document", info: new Info({ plugins }) })],
+        blocked: false,
+      }),
       entries: () => Effect.succeed([new Document({ type: "document", info: new Info({ plugins }) })]),
       changes: () => Stream.never,
     }),
@@ -70,12 +74,7 @@ describe("SkillPlugin.Plugin", () => {
       expect(report?.content).toContain("- Active plugins: -disabled, local.ts, package-plugin, package-plugin")
     }).pipe(
       Effect.provide(
-        config([
-          "package-plugin",
-          "-disabled",
-          "local.ts",
-          { package: "package-plugin", options: { enabled: true } },
-        ]),
+        config(["package-plugin", "-disabled", "local.ts", { package: "package-plugin", options: { enabled: true } }]),
       ),
     ),
   )

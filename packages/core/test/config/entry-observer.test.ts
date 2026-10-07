@@ -13,6 +13,7 @@ describe("ConfigEntryObserver", () => {
       const updates = yield* PubSub.unbounded<ReturnType<typeof updated>>()
       const reloaded = yield* Deferred.make<void>()
       const config = Config.Service.of({
+        current: () => ({ entries: Ref.getUnsafe(current), blocked: false }),
         entries: () => Ref.get(current),
         changes: () => Stream.empty,
       })
